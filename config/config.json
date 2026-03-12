@@ -1,0 +1,19 @@
+{
+    "num_workers": 4,
+    "queue_capacity": 1000,
+    "scheduler_type": "priority",
+    "task_timeout_ms": 5000,
+    "shutdown_timeout_ms": 10000,
+    "circuit_breaker": {
+        "failure_threshold": 5,
+        "recovery_timeout_s": 30
+    },
+    "monitor": {
+        "refresh_interval_ms": 1000,
+        "window_size_s": 30
+    },
+    "health_check": {
+        "interval_s": 5,
+        "status_file": "/tmp/health"
+    }
+}
