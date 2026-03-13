@@ -14,22 +14,15 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug)
 endif()
 
+# ── Main executable ──────────────────────────────────────────────────────
 add_executable(TaskQueue src/main.cpp)
 target_include_directories(TaskQueue PRIVATE include)
 
-# add_subdirectory(tests)   <- uncommented in Milestone 7
-
-# Threading
+# ── Threading ────────────────────────────────────────────────────────────
 find_package(Threads REQUIRED)
 target_link_libraries(TaskQueue PRIVATE Threads::Threads)
 
-# -----------------------------------------------------------------------
-# nlohmann/json — header-only JSON library for Config loading (Milestone 2)
-#
-# FetchContent downloads it at configure time (cmake ..).
-# JSON_Install=OFF    → don't install to system paths
-# JSON_BuildTests=OFF → skip the library's own test suite
-# -----------------------------------------------------------------------
+# ── nlohmann/json ────────────────────────────────────────────────────────
 include(FetchContent)
 
 FetchContent_Declare(
@@ -42,3 +35,17 @@ set(JSON_BuildTests OFF CACHE INTERNAL "")
 FetchContent_MakeAvailable(nlohmann_json)
 
 target_link_libraries(TaskQueue PRIVATE nlohmann_json::nlohmann_json)
+
+# ── GoogleTest ───────────────────────────────────────────────────────────
+FetchContent_Declare(
+    googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG        v1.14.0
+)
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
+
+# ── Tests ────────────────────────────────────────────────────────────────
+enable_testing()
+add_subdirectory(tests)

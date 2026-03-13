@@ -1,0 +1,52 @@
+# -----------------------------------------------------------------------
+# ci.yml — Build and test on every push and pull request to main
+#
+# Workflow:
+#   1. Checkout code
+#   2. Configure with CMake (downloads GoogleTest + nlohmann/json)
+#   3. Build all targets (TaskQueue + all test executables)
+#   4. Run all tests with CTest
+#
+# Why Ubuntu and not macOS?
+#   - Ubuntu runners are free on GitHub Actions
+#   - Most production servers run Linux — testing on Linux catches
+#     platform-specific bugs before they reach production
+# -----------------------------------------------------------------------
+
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ───────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. Install dependencies ───────────────────────────────────
+      - name: Install cmake and gcc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ build-essential
+
+      # ── 3. Configure ──────────────────────────────────────────────
+      # Downloads GoogleTest + nlohmann/json via FetchContent
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug
+
+      # ── 4. Build ──────────────────────────────────────────────────
+      - name: Build
+        run: cmake --build build --parallel
+
+      # ── 5. Test ───────────────────────────────────────────────────
+      # --output-on-failure: shows test output only when a test fails
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure

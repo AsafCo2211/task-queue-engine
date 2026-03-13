@@ -1,15 +1,15 @@
 {
     "num_workers": 4,
     "queue_capacity": 1000,
-    "scheduler_type": "priority",
-    "task_timeout_ms": 5000,
+    "scheduler_type": "fifo",
+    "task_timeout_ms": 150,
     "shutdown_timeout_ms": 10000,
     "circuit_breaker": {
-        "failure_threshold": 5,
-        "recovery_timeout_s": 30
+        "failure_threshold": 2,
+        "recovery_timeout_s": 3
     },
     "monitor": {
-        "refresh_interval_ms": 1000,
+        "refresh_interval_ms": 500,
         "window_size_s": 30
     },
     "health_check": {
