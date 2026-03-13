@@ -28,9 +28,9 @@ This project builds that engine from scratch: the thread-safe queue, the worker 
 │                                                                     │
 │  [Producer A] ─────┐                  ┌──▶ [Worker 1] ──▶ CB        │
 │  [Producer B] ─────┼──▶ [Broker]  ────┼──▶ [Worker 2] ──▶ CB        │
-│  [Producer C] ─────┘    │              └──▶ [Worker 3] ──▶ CB       │
-│                          │ Scheduler                  │             │
-│                          │ (FIFO/Priority/RoundRobin) │             │
+│  [Producer C] ─────┘    │             └──▶ [Worker 3] ──▶ CB       │
+│                         │ Scheduler                   │             │
+│                         │ (FIFO/Priority/RoundRobin)  │             │
 │                                                       ▼             │
 │                    [Monitor] ◀─── Observer ───────────┘             │
 │                        │                                            │
