@@ -1,98 +1,85 @@
 #pragma once
 
 #include "Task.hpp"
+#include "IScheduler.hpp"
+#include "FifoScheduler.hpp"
 
-#include <queue>
+#include <deque>
 #include <mutex>
 #include <condition_variable>
 #include <optional>
+#include <memory>
 
 // -----------------------------------------------------------------------
-// TaskBroker — the heart of the system
+// TaskBroker — the heart of the system (updated for Milestone 3)
 //
-// Responsibilities:
-//   - Accept tasks from any number of Producer threads (enqueue)
-//   - Hand tasks out to any number of Worker threads  (dequeue)
-//   - Let Workers sleep when the queue is empty       (condition_variable)
-//   - Signal all Workers to stop cleanly              (shutdown)
+// What changed from M1/M2:
+//   - Internal queue_ is now std::deque<Task> (was std::queue)
+//     Reason: IScheduler::next() needs random access to reorder tasks.
+//             std::queue only exposes front/back — not enough.
 //
-// Thread safety:
-//   Every public method is safe to call from multiple threads
-//   simultaneously. The mutex_ serialises all queue access.
+//   - Holds a std::unique_ptr<IScheduler>
+//     Reason: Strategy pattern — broker delegates the "who goes next"
+//             decision to the scheduler without knowing its type.
 //
-// Capacity:
-//   If capacity_ is reached, enqueue() returns false (backpressure).
-//   The Producer is responsible for handling that signal.
-//   (Milestone 5 expands this into Circuit Breaker logic.)
+//   - dequeue() now calls scheduler_->next(queue_) instead of queue_.front()
+//     This single line change is the entire Strategy pattern in action.
+//
+// Everything else (mutex, condition_variable, backpressure, shutdown)
+// is unchanged — the scheduler plugs in without touching any of that.
 // -----------------------------------------------------------------------
 class TaskBroker {
 public:
-    // capacity = max tasks allowed in the queue at once
-    explicit TaskBroker(std::size_t capacity = 1000)
-        : capacity_(capacity), shutdown_(false) {}
+    // Default scheduler is FIFO — safe, predictable, zero config needed
+    explicit TaskBroker(std::size_t capacity = 1000,
+                        std::unique_ptr<IScheduler> scheduler =
+                            std::make_unique<FifoScheduler>())
+        : capacity_(capacity)
+        , shutdown_(false)
+        , scheduler_(std::move(scheduler))
+    {}
 
     // ------------------------------------------------------------------
-    // enqueue — called by Producers
-    //
-    // Takes a Task by value (move-friendly).
-    // Returns false if the queue is full (backpressure) or shutting down.
+    // enqueue — called by Producers (unchanged from M1)
     // ------------------------------------------------------------------
     bool enqueue(Task task) {
         {
             std::unique_lock<std::mutex> lock(mutex_);
-
-            // Reject new work during shutdown or when queue is full
             if (shutdown_ || queue_.size() >= capacity_) {
                 return false;
             }
-
-            queue_.push(std::move(task));
+            queue_.push_back(std::move(task));
         }
-        // Notify ONE sleeping Worker that there is work to do.
-        // We release the lock BEFORE notifying — this is the canonical
-        // pattern: avoids the notified thread immediately re-blocking
-        // on the mutex we still hold.
         cv_.notify_one();
         return true;
     }
 
     // ------------------------------------------------------------------
-    // dequeue — called by Workers
+    // dequeue — now delegates ordering to the scheduler
     //
-    // Blocks (sleeps) until a task is available OR shutdown is requested.
-    // Returns std::nullopt when the broker is shut down and queue is empty.
+    // Before M3:  task = queue_.front(); queue_.pop();
+    // After  M3:  task = scheduler_->next(queue_);
     //
-    // std::optional<Task> lets us express "nothing left" without exceptions.
+    // That's it. One line. The entire Strategy pattern.
     // ------------------------------------------------------------------
     std::optional<Task> dequeue() {
         std::unique_lock<std::mutex> lock(mutex_);
 
-        // Sleep until: queue has something  OR  we are shutting down.
-        // The lambda is the "predicate" — cv.wait re-checks it every
-        // time the thread is woken up (guards against spurious wakeups).
         cv_.wait(lock, [this] {
             return !queue_.empty() || shutdown_;
         });
 
-        // Woken up because of shutdown AND queue is now empty → stop.
         if (queue_.empty()) {
             return std::nullopt;
         }
 
-        // Move the front task out of the queue (avoids a copy of payload)
-        Task task = std::move(queue_.front());
-        queue_.pop();
+        // Delegate the selection to whichever scheduler is plugged in
+        Task task = scheduler_->next(queue_);
         return task;
     }
 
     // ------------------------------------------------------------------
-    // shutdown — signals all Workers to finish and exit
-    //
-    // After this call:
-    //   - enqueue() will return false for any new tasks
-    //   - dequeue() will drain remaining tasks, then return nullopt
-    //
-    // notify_all() wakes EVERY sleeping Worker so none remain stuck.
+    // shutdown — unchanged from M1
     // ------------------------------------------------------------------
     void shutdown() {
         {
@@ -103,7 +90,19 @@ public:
     }
 
     // ------------------------------------------------------------------
-    // Accessors (safe to call from any thread)
+    // setScheduler — swap algorithm at runtime (no restart needed)
+    // ------------------------------------------------------------------
+    void setScheduler(std::unique_ptr<IScheduler> s) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        scheduler_ = std::move(s);
+    }
+
+    const char* schedulerName() const {
+        return scheduler_->name();
+    }
+
+    // ------------------------------------------------------------------
+    // Accessors
     // ------------------------------------------------------------------
     std::size_t size() const {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -119,7 +118,9 @@ private:
     std::size_t                     capacity_;
     bool                            shutdown_;
 
-    std::queue<Task>                queue_;
-    mutable std::mutex              mutex_;    // mutable: const methods can lock
+    std::deque<Task>                queue_;      // deque: random access for schedulers
+    std::unique_ptr<IScheduler>     scheduler_;  // Strategy: pluggable algorithm
+
+    mutable std::mutex              mutex_;
     std::condition_variable         cv_;
 };

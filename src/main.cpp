@@ -2,6 +2,7 @@
 #include "Task.hpp"
 #include "TaskBroker.hpp"
 #include "WorkerPool.hpp"
+#include "SchedulerFactory.hpp"
 
 #include <iostream>
 #include <thread>
@@ -9,24 +10,27 @@
 #include <atomic>
 
 // -----------------------------------------------------------------------
-// Milestone 2 — Config + WorkerPool
+// Milestone 3 — Strategy Pattern: Schedulers
 //
-// What changed from M1:
-//   - All magic numbers gone → come from config.json
-//   - WorkerPool replaces the raw vector<unique_ptr<Worker>> in main
-//   - Graceful shutdown with timeout replaces the manual poll loop
-//   - ENV overrides ready for Docker (Milestone 6)
+// What changed from M2:
+//   - TaskBroker receives a scheduler from SchedulerFactory
+//   - Scheduler type comes from config (zero hardcoding)
+//   - Demo submits tasks with varying priorities so the difference
+//     between FIFO and Priority is visible in the output
 // -----------------------------------------------------------------------
 
 static std::atomic<int> next_task_id {1};
 
-Task makeTask(const std::string& producer_name, int local_id) {
+// Tasks now have meaningful priorities: 1 (low), 5 (medium), 10 (high)
+// so PriorityScheduler output is clearly different from FIFO
+Task makeTask(const std::string& producer_name, int local_id, int priority) {
     Task t;
     t.id       = next_task_id.fetch_add(1);
-    t.name     = producer_name + "-task-" + std::to_string(local_id);
-    t.priority = local_id % 3;
+    t.name     = producer_name + "-task-" + std::to_string(local_id)
+                 + "[p=" + std::to_string(priority) + "]";
+    t.priority = priority;
     t.payload  = []() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50 + (rand() % 100)));
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
     };
     return t;
 }
@@ -34,46 +38,59 @@ Task makeTask(const std::string& producer_name, int local_id) {
 int producerThread(const std::string& name, TaskBroker& broker, int count) {
     int submitted = 0;
     for (int i = 1; i <= count; ++i) {
-        if (broker.enqueue(makeTask(name, i))) {
-            std::cout << "[" << name << "] submitted task " << i << "/" << count << "\n";
+        // Cycle through priorities 1, 5, 10 so we have a mix
+        int priority = (i % 3 == 0) ? 10 : (i % 3 == 1) ? 1 : 5;
+        if (broker.enqueue(makeTask(name, i, priority))) {
             ++submitted;
-        } else {
-            std::cout << "[" << name << "] queue full/shutdown — task " << i << " dropped\n";
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     return submitted;
 }
 
 int main() {
-    std::cout << "=== Distributed Task Queue Engine — Milestone 2 ===\n\n";
+    std::cout << "=== Distributed Task Queue Engine — Milestone 3 ===\n\n";
 
     // ------------------------------------------------------------------
     // Step 1: Load config
-    // Path is relative to where you run the binary from.
-    // Run from the repo root: ./build/TaskQueue
     // ------------------------------------------------------------------
     Config cfg;
     try {
         cfg = Config::load("config/config.json");
-        cfg.applyEnvOverrides();   // Docker ENV wins over JSON
+        cfg.applyEnvOverrides();
     } catch (const std::exception& e) {
-        std::cerr << "Failed to load config: " << e.what() << "\n";
-        std::cerr << "Using defaults.\n";
+        std::cerr << "Config error: " << e.what() << " — using defaults.\n";
     }
     cfg.print();
 
     // ------------------------------------------------------------------
-    // Step 2: Create broker and worker pool — driven entirely by config
+    // Step 2: Create scheduler from config — this is the Factory Pattern
+    //
+    // main.cpp doesn't know if it's FIFO, Priority, or RoundRobin.
+    // It just asks the factory and gets back a unique_ptr<IScheduler>.
+    // Change config.json → different behaviour, zero code changes.
     // ------------------------------------------------------------------
-    TaskBroker broker(cfg.queue_capacity);
+    auto scheduler = SchedulerFactory::create(cfg.scheduler_type);
+
+    // ------------------------------------------------------------------
+    // Step 3: Hand scheduler to broker — this is the Strategy Pattern
+    //
+    // Broker stores unique_ptr<IScheduler>.
+    // dequeue() calls scheduler_->next(queue_) — no if/else, no switch.
+    // ------------------------------------------------------------------
+    TaskBroker broker(cfg.queue_capacity, std::move(scheduler));
+    std::cout << "\nScheduler: " << broker.schedulerName() << "\n\n";
+
     WorkerPool pool(broker, cfg.num_workers);
 
     // ------------------------------------------------------------------
-    // Step 3: Launch producers (same as M1 — 3 producers, 5 tasks each)
+    // Step 4: Submit tasks with mixed priorities
+    // With FIFO      → tasks execute in submission order
+    // With Priority  → high-priority [p=10] tasks jump the queue
+    // With RoundRobin → tasks rotate evenly
     // ------------------------------------------------------------------
-    std::cout << "\nLaunching producers...\n\n";
-    const int TASKS_PER_PRODUCER = 5;
+    std::cout << "Submitting tasks (mixed priorities: 1, 5, 10)...\n\n";
+    const int TASKS_PER_PRODUCER = 6;
 
     std::vector<std::thread> producers;
     std::vector<int> counts(3, 0);
@@ -82,18 +99,12 @@ int main() {
     producers.emplace_back([&](){ counts[2] = producerThread("Producer-C", broker, TASKS_PER_PRODUCER); });
 
     for (auto& p : producers) p.join();
-    std::cout << "\nAll producers done. Total submitted: "
-              << counts[0] + counts[1] + counts[2] << "\n";
+    std::cout << "\nAll producers done. Total: "
+              << counts[0] + counts[1] + counts[2] << " tasks\n";
 
-    // ------------------------------------------------------------------
-    // Step 4: Graceful shutdown via WorkerPool
-    //
-    // WorkerPool::shutdown() replaces the manual poll loop from M1.
-    // timeout comes from config so ops can tune it without recompile.
-    // ------------------------------------------------------------------
     std::cout << "\nRequesting graceful shutdown...\n";
     pool.shutdown(cfg.shutdown_timeout_ms);
 
-    std::cout << "\n=== All done. Milestone 2 complete. ===\n";
+    std::cout << "\n=== All done. Milestone 3 complete. ===\n";
     return 0;
 }
