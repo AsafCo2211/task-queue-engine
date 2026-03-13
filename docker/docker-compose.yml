@@ -1,0 +1,44 @@
+# =======================================================================
+# docker-compose.yml — brings up the full TaskQueueEngine stack
+#
+# Usage:
+#   docker-compose up          # build + run
+#   docker-compose up --build  # force rebuild
+#   docker-compose down        # stop + remove containers
+#
+# ENV overrides:
+#   Any value here overrides config.json via Config::applyEnvOverrides().
+#   Change workers or scheduler here — zero recompile needed.
+# =======================================================================
+
+services:
+  task-queue:
+    build:
+      context: ..          # build context is the repo root
+      dockerfile: docker/Dockerfile
+
+    container_name: task-queue-engine
+
+    # ── Environment overrides ──────────────────────────────────────
+    # These ENV variables override config.json values at startup.
+    # See Config::applyEnvOverrides() in Config.hpp.
+    environment:
+      - NUM_WORKERS=4
+      - SCHEDULER_TYPE=priority
+      - QUEUE_CAPACITY=1000
+      - TASK_TIMEOUT_MS=5000
+
+    # ── Health check ───────────────────────────────────────────────
+    # Mirrors the HEALTHCHECK in Dockerfile — explicit here so
+    # docker-compose ps shows healthy/unhealthy status.
+    healthcheck:
+      test: ["CMD", "grep", "-q", "UP", "/tmp/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+    # ── Restart policy ─────────────────────────────────────────────
+    # on-failure: restart only if exit code is non-zero.
+    # Prevents infinite restart loops on clean shutdowns.
+    restart: on-failure

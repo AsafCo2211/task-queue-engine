@@ -3,6 +3,7 @@
 #include "Monitor.hpp"
 #include "TaskBroker.hpp"
 #include "WorkerPool.hpp"
+#include "HealthChecker.hpp"
 
 #include <thread>
 #include <atomic>
@@ -11,18 +12,20 @@
 #include <sstream>
 
 // -----------------------------------------------------------------------
-// CLIDashboard — updated for Milestone 5
+// CLIDashboard — updated for Milestone 6
 //
 // What changed:
-//   - Shows circuit breaker states for each Worker
-//   - OPEN circuits highlighted in red — immediate visual alert
+//   - Accepts optional HealthChecker* for health status row
+//   - Shows UP (green) / DEGRADED (yellow) / DOWN (red)
 // -----------------------------------------------------------------------
 class CLIDashboard {
 public:
     CLIDashboard(Monitor& monitor, TaskBroker& broker,
-                 WorkerPool& pool, int refresh_ms = 1000)
+                 WorkerPool& pool, int refresh_ms = 1000,
+                 HealthChecker* health = nullptr)
         : monitor_(monitor), broker_(broker)
-        , pool_(pool), refresh_ms_(refresh_ms), running_(false)
+        , pool_(pool), refresh_ms_(refresh_ms)
+        , health_(health), running_(false)
     {}
 
     ~CLIDashboard() { stop(); }
@@ -54,53 +57,55 @@ private:
         s.workers_active = pool_.activeCount();
         s.scheduler_name = broker_.schedulerName();
 
-        std::string circuits = pool_.circuitStates();
-
-        // Check if any circuit is OPEN — for red highlight
+        std::string circuits  = pool_.circuitStates();
+        std::string health_status = health_ ? health_->currentStatus() : "N/A";
         bool any_open = circuits.find("OPEN") != std::string::npos;
 
         std::ostringstream out;
-        out << "\033[2J\033[3J\033[H";  // clear screen
+        out << "\033[2J\033[3J\033[H";
 
         // ── Header ──────────────────────────────────────────────────
         out << "\033[1m"
             << "╔══════════════════════════════════════════════════╗\n"
-            << "║   Distributed Task Queue Engine  —  Live        ║\n"
+            << "║   Distributed Task Queue Engine  —  Live         ║\n"
             << "╠══════════════════════════════════════════════════╣\n"
             << "\033[0m";
 
+        // ── Health Status ────────────────────────────────────────────
+        out << "║  Health     : ";
+        if      (health_status == "UP")       out << "\033[32m";  // green
+        else if (health_status == "DEGRADED") out << "\033[33m";  // yellow
+        else                                  out << "\033[31m";  // red
+        out << padRight(health_status, 35) << "\033[0m║\n";
+
         // ── Scheduler ───────────────────────────────────────────────
-        out << "║  Scheduler : \033[1m"
-            << padRight(s.scheduler_name, 34)
-            << "\033[0m║\n"
+        out << "║  Scheduler  : \033[1m"
+            << padRight(s.scheduler_name, 33)
+            << "\033[0m  ║\n"
             << "╠══════════════════════════════════════════════════╣\n";
 
         // ── Queue & Workers ─────────────────────────────────────────
         out << "║  Queue Depth    : "
             << padRight(std::to_string(s.queue_depth) + " tasks waiting", 30)
             << " ║\n";
-
         out << "║  Workers Active : "
             << padRight(std::to_string(s.workers_active) + " / "
                 + std::to_string(pool_.totalCount()), 30)
             << " ║\n";
-
         out << "╠══════════════════════════════════════════════════╣\n";
 
-        // ── Circuit Breaker status ───────────────────────────────────
+        // ── Circuit Breaker ──────────────────────────────────────────
         out << "║  Circuits : ";
-        if (any_open) out << "\033[31m";   // red if any OPEN
+        if (any_open) out << "\033[31m";
         out << padRight(circuits, 37);
         if (any_open) out << "\033[0m";
         out << "║\n";
-
         out << "╠══════════════════════════════════════════════════╣\n";
 
         // ── Metrics ─────────────────────────────────────────────────
         out << "║  Throughput     : "
             << padRight(formatDouble(s.throughput_per_s, 1) + " tasks/sec", 30)
             << " ║\n";
-
         out << "║  Avg Latency    : "
             << padRight(formatDouble(s.avg_latency_ms, 1) + " ms", 30)
             << " ║\n";
@@ -111,16 +116,13 @@ private:
         out << padRight(err_str, 30);
         if (s.error_rate_pct > 0.0) out << "\033[0m";
         out << " ║\n";
-
         out << "╠══════════════════════════════════════════════════╣\n";
 
         // ── Totals ──────────────────────────────────────────────────
-        out << "║  \033[32mCompleted\033[0m        : "
+        out << "║  \033[32mCompleted\033[0m      : "
             << padRight(std::to_string(s.total_completed), 30) << " ║\n";
-
-        out << "║  \033[31mFailed\033[0m           : "
+        out << "║  \033[31mFailed\033[0m         : "
             << padRight(std::to_string(s.total_failed), 30) << " ║\n";
-
         out << "╚══════════════════════════════════════════════════╝\n";
 
         std::cout << out.str() << std::flush;
@@ -141,6 +143,7 @@ private:
     TaskBroker&       broker_;
     WorkerPool&       pool_;
     int               refresh_ms_;
+    HealthChecker*    health_;       // optional — nullptr if not used
     std::atomic<bool> running_;
     std::thread       thread_;
 };
