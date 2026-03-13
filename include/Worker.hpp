@@ -2,112 +2,115 @@
 
 #include "TaskBroker.hpp"
 #include "Task.hpp"
+#include "IObserver.hpp"
+#include "TaskResult.hpp"
 
 #include <thread>
 #include <atomic>
-#include <iostream>
+#include <vector>
 #include <stdexcept>
 
 // -----------------------------------------------------------------------
-// Worker — a single background thread that consumes tasks from the broker
+// Worker — updated for Milestone 4 (Observer pattern)
 //
-// Lifecycle:
-//   1. Constructor starts the thread immediately (RAII-style).
-//   2. The thread loops: dequeue → mark RUNNING → execute → mark DONE/FAILED
-//   3. When broker.dequeue() returns nullopt (shutdown), the loop exits.
-//   4. Destructor joins the thread (waits for it to finish cleanly).
+// What changed:
+//   - Holds a list of IObserver* (observers_)
+//   - After every task (success or fail), calls notifyAll(result)
+//   - Removed direct std::cout — Dashboard now owns the screen
+//     (Workers still report errors to std::cerr as a fallback)
 //
-// Error handling:
-//   If the task payload throws, we catch it, mark the task FAILED,
-//   and print a message — the Worker continues to the next task.
-//   (Circuit Breaker in Milestone 5 will count these failures.)
-//
-// Thread safety:
-//   Each Worker owns its own thread. The only shared resource is the
-//   TaskBroker (which is thread-safe internally).
+// Observer registration:
+//   addObserver(IObserver*) — call before starting work
+//   Observers are non-owning raw pointers: Worker doesn't manage
+//   their lifetime. Caller must ensure they outlive the Worker.
 // -----------------------------------------------------------------------
 class Worker {
 public:
     Worker(int id, TaskBroker& broker)
         : id_(id), broker_(broker)
     {
-        // Start the worker thread immediately upon construction.
-        // The thread runs the private run() method.
         thread_ = std::thread(&Worker::run, this);
     }
 
-    // Destructor — wait for the thread to finish before destroying the object.
-    // If we did NOT join, the destructor of std::thread would call
-    // std::terminate() and crash the program.
     ~Worker() {
-        if (thread_.joinable()) {
-            thread_.join();
-        }
+        if (thread_.joinable()) thread_.join();
     }
 
-    // Non-copyable: a thread cannot be copied.
     Worker(const Worker&)            = delete;
     Worker& operator=(const Worker&) = delete;
+    Worker(Worker&&)                 = delete;
+    Worker& operator=(Worker&&)      = delete;
 
-    // Movable: we need this to store Workers in std::vector (Milestone 2)
-    Worker(Worker&&)            = delete;
-    Worker& operator=(Worker&&) = delete;
+    // Register an observer — must be called before tasks start flowing
+    void addObserver(IObserver* obs) {
+        observers_.push_back(obs);
+    }
 
-    int  id()       const { return id_; }
-    bool isBusy()   const { return busy_.load(); }
+    int  id()     const { return id_; }
+    bool isBusy() const { return busy_.load(); }
 
 private:
-    // ------------------------------------------------------------------
-    // run — the main loop executed by the background thread
-    //
-    // Keeps pulling tasks from the broker until dequeue() returns nullopt
-    // (which happens when broker.shutdown() is called AND queue is empty).
-    // ------------------------------------------------------------------
     void run() {
         while (true) {
-            // Block here until a task is available or shutdown is signalled.
             std::optional<Task> maybe_task = broker_.dequeue();
-
-            // nullopt = broker shut down and queue is empty → exit loop
-            if (!maybe_task.has_value()) {
-                break;
-            }
+            if (!maybe_task.has_value()) break;
 
             Task& task = maybe_task.value();
             busy_.store(true);
 
-            std::cout << "[Worker " << id_ << "] starting task "
-                      << task.id << " (" << task.name << ")\n";
+            // Record when we started executing (for latency measurement)
+            auto started = std::chrono::steady_clock::now();
+            task.status  = TaskStatus::RUNNING;
 
-            task.status = TaskStatus::RUNNING;
+            TaskResult result;
+            result.task_id    = task.id;
+            result.task_name  = task.name;
+            result.worker_id  = id_;
+            result.started_at = started;
 
             try {
-                // Execute the actual work (the lambda stored in payload)
                 task.payload();
-                task.status = TaskStatus::DONE;
-
-                std::cout << "[Worker " << id_ << "] finished task "
-                          << task.id << " ✓\n";
+                task.status   = TaskStatus::DONE;
+                result.success = true;
             }
             catch (const std::exception& e) {
-                task.status = TaskStatus::FAILED;
-                std::cerr << "[Worker " << id_ << "] task " << task.id
-                          << " FAILED: " << e.what() << "\n";
+                task.status      = TaskStatus::FAILED;
+                result.success   = false;
+                result.error_msg = e.what();
             }
             catch (...) {
-                task.status = TaskStatus::FAILED;
-                std::cerr << "[Worker " << id_ << "] task " << task.id
-                          << " FAILED: unknown exception\n";
+                task.status      = TaskStatus::FAILED;
+                result.success   = false;
+                result.error_msg = "unknown exception";
             }
+
+            result.finished_at = std::chrono::steady_clock::now();
+
+            // Notify all registered observers — this is the Observer pattern
+            // Worker doesn't know who's listening or how many there are
+            notifyAll(result);
 
             busy_.store(false);
         }
-
-        std::cout << "[Worker " << id_ << "] exiting.\n";
     }
 
-    int              id_;
-    TaskBroker&      broker_;     // reference — broker outlives all workers
-    std::thread      thread_;
-    std::atomic<bool> busy_ {false};
+    // ------------------------------------------------------------------
+    // notifyAll — the Observer pattern in action
+    //
+    // Iterates over all registered observers and calls onTaskComplete().
+    // Adding a new observer (Logger, AlertSystem) = zero changes here.
+    // ------------------------------------------------------------------
+    void notifyAll(const TaskResult& result) {
+        for (auto* obs : observers_) {
+            obs->onTaskComplete(result);
+        }
+    }
+
+    int               id_;
+    TaskBroker&       broker_;
+    std::thread       thread_;
+    std::atomic<bool> busy_  {false};
+
+    // Non-owning pointers — observers outlive workers
+    std::vector<IObserver*> observers_;
 };

@@ -3,6 +3,8 @@
 #include "TaskBroker.hpp"
 #include "WorkerPool.hpp"
 #include "SchedulerFactory.hpp"
+#include "Monitor.hpp"
+#include "CLIDashboard.hpp"
 
 #include <iostream>
 #include <thread>
@@ -10,101 +12,101 @@
 #include <atomic>
 
 // -----------------------------------------------------------------------
-// Milestone 3 — Strategy Pattern: Schedulers
+// Milestone 4 — Observer Pattern + CLI Dashboard
 //
-// What changed from M2:
-//   - TaskBroker receives a scheduler from SchedulerFactory
-//   - Scheduler type comes from config (zero hardcoding)
-//   - Demo submits tasks with varying priorities so the difference
-//     between FIFO and Priority is visible in the output
+// What changed from M3:
+//   - Monitor registered as Observer on all Workers
+//   - CLIDashboard starts on its own thread, refreshes every second
+//   - Workers no longer print directly — Dashboard owns the screen
+//   - More tasks + longer run to make the Dashboard visible
 // -----------------------------------------------------------------------
 
 static std::atomic<int> next_task_id {1};
 
-// Tasks now have meaningful priorities: 1 (low), 5 (medium), 10 (high)
-// so PriorityScheduler output is clearly different from FIFO
-Task makeTask(const std::string& producer_name, int local_id, int priority) {
+Task makeTask(const std::string& producer_name, int local_id, bool fail = false) {
     Task t;
     t.id       = next_task_id.fetch_add(1);
+    t.priority = local_id % 5;
     t.name     = producer_name + "-task-" + std::to_string(local_id)
-                 + "[p=" + std::to_string(priority) + "]";
-    t.priority = priority;
-    t.payload  = []() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                 + "[p=" + std::to_string(t.priority) + "]";
+    t.payload  = [fail]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20 + (rand() % 80)));
+        if (fail) throw std::runtime_error("simulated failure");
     };
     return t;
 }
 
-int producerThread(const std::string& name, TaskBroker& broker, int count) {
-    int submitted = 0;
+void producerThread(const std::string& name, TaskBroker& broker, int count) {
     for (int i = 1; i <= count; ++i) {
-        // Cycle through priorities 1, 5, 10 so we have a mix
-        int priority = (i % 3 == 0) ? 10 : (i % 3 == 1) ? 1 : 5;
-        if (broker.enqueue(makeTask(name, i, priority))) {
-            ++submitted;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        // ~10% of tasks will fail — so we see error rate > 0 in Dashboard
+        bool fail = (rand() % 10 == 0);
+        broker.enqueue(makeTask(name, i, fail));
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
     }
-    return submitted;
 }
 
 int main() {
-    std::cout << "=== Distributed Task Queue Engine — Milestone 3 ===\n\n";
-
     // ------------------------------------------------------------------
-    // Step 1: Load config
+    // Step 1: Load config — fail fast on bad config (fixed in M3 review)
     // ------------------------------------------------------------------
     Config cfg;
     try {
         cfg = Config::load("config/config.json");
         cfg.applyEnvOverrides();
     } catch (const std::exception& e) {
-        std::cerr << "Config error: " << e.what() << " — using defaults.\n";
+        std::cerr << "FATAL: config error: " << e.what() << "\n";
+        return 1;
     }
-    cfg.print();
 
     // ------------------------------------------------------------------
-    // Step 2: Create scheduler from config — this is the Factory Pattern
-    //
-    // main.cpp doesn't know if it's FIFO, Priority, or RoundRobin.
-    // It just asks the factory and gets back a unique_ptr<IScheduler>.
-    // Change config.json → different behaviour, zero code changes.
+    // Step 2: Wire up all components
     // ------------------------------------------------------------------
     auto scheduler = SchedulerFactory::create(cfg.scheduler_type);
-
-    // ------------------------------------------------------------------
-    // Step 3: Hand scheduler to broker — this is the Strategy Pattern
-    //
-    // Broker stores unique_ptr<IScheduler>.
-    // dequeue() calls scheduler_->next(queue_) — no if/else, no switch.
-    // ------------------------------------------------------------------
     TaskBroker broker(cfg.queue_capacity, std::move(scheduler));
-    std::cout << "\nScheduler: " << broker.schedulerName() << "\n\n";
 
     WorkerPool pool(broker, cfg.num_workers);
 
-    // ------------------------------------------------------------------
-    // Step 4: Submit tasks with mixed priorities
-    // With FIFO      → tasks execute in submission order
-    // With Priority  → high-priority [p=10] tasks jump the queue
-    // With RoundRobin → tasks rotate evenly
-    // ------------------------------------------------------------------
-    std::cout << "Submitting tasks (mixed priorities: 1, 5, 10)...\n\n";
-    const int TASKS_PER_PRODUCER = 6;
+    // Monitor is the Observer — registered on every Worker in the pool
+    Monitor monitor(cfg.monitor_window_s);
+    pool.addObserver(&monitor);
 
+    // Dashboard reads from Monitor + Broker + Pool every second
+    CLIDashboard dashboard(monitor, broker, pool, cfg.monitor_refresh_ms);
+
+    // ------------------------------------------------------------------
+    // Step 3: Start Dashboard BEFORE producers — so it's visible
+    // ------------------------------------------------------------------
+    dashboard.start();
+
+    // ------------------------------------------------------------------
+    // Step 4: Run producers — more tasks, longer run = visible Dashboard
+    // ------------------------------------------------------------------
+    const int TASKS_PER_PRODUCER = 40;
     std::vector<std::thread> producers;
-    std::vector<int> counts(3, 0);
-    producers.emplace_back([&](){ counts[0] = producerThread("Producer-A", broker, TASKS_PER_PRODUCER); });
-    producers.emplace_back([&](){ counts[1] = producerThread("Producer-B", broker, TASKS_PER_PRODUCER); });
-    producers.emplace_back([&](){ counts[2] = producerThread("Producer-C", broker, TASKS_PER_PRODUCER); });
+    producers.emplace_back([&](){ producerThread("Producer-A", broker, TASKS_PER_PRODUCER); });
+    producers.emplace_back([&](){ producerThread("Producer-B", broker, TASKS_PER_PRODUCER); });
+    producers.emplace_back([&](){ producerThread("Producer-C", broker, TASKS_PER_PRODUCER); });
 
     for (auto& p : producers) p.join();
-    std::cout << "\nAll producers done. Total: "
-              << counts[0] + counts[1] + counts[2] << " tasks\n";
 
-    std::cout << "\nRequesting graceful shutdown...\n";
+    // Give workers time to drain the queue
+    while (broker.size() > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // ------------------------------------------------------------------
+    // Step 5: Graceful shutdown
+    // ------------------------------------------------------------------
+    dashboard.stop();
     pool.shutdown(cfg.shutdown_timeout_ms);
 
-    std::cout << "\n=== All done. Milestone 3 complete. ===\n";
+    // Final summary below the dashboard
+    auto snap = monitor.snapshot();
+    std::cout << "\n✅ Run complete.\n"
+              << "   Completed : " << snap.total_completed << "\n"
+              << "   Failed    : " << snap.total_failed    << "\n"
+              << "   Avg ms    : " << snap.avg_latency_ms  << "\n";
+
     return 0;
 }
