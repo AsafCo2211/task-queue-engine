@@ -152,26 +152,7 @@ Docker's `HEALTHCHECK CMD` reads `/tmp/health` directly — no web server needed
 
 ## Live CLI Dashboard
 
-```
-╔══════════════════════════════════════════════════╗
-║   Distributed Task Queue Engine  —  Live         ║
-╠══════════════════════════════════════════════════╣
-║  Health     : UP                                 ║
-║  Scheduler  : Priority                           ║
-╠══════════════════════════════════════════════════╣
-║  Queue Depth    : 12 tasks waiting               ║
-║  Workers Active : 3 / 4                          ║
-╠══════════════════════════════════════════════════╣
-║Circuits: W1:CLOSED W2:CLOSED W3:CLOSED W4:CLOSED ║
-╠══════════════════════════════════════════════════╣
-║  Throughput     : 6.4 tasks/sec                  ║
-║  Avg Latency    : 153.2 ms                       ║
-║  Error Rate     : 0.0%                           ║
-╠══════════════════════════════════════════════════╣
-║  Completed      : 40                             ║
-║  Failed         : 0                              ║
-╚══════════════════════════════════════════════════╝
-```
+![Dashboard Screenshot](docs/dashboard.png)
 
 Color coding: Health green (UP) / yellow (DEGRADED) / red (DOWN). Error rate and OPEN circuits highlighted in red.
 
