@@ -1,20 +1,21 @@
+#include "Config.hpp"
 #include "Task.hpp"
 #include "TaskBroker.hpp"
-#include "Worker.hpp"
+#include "WorkerPool.hpp"
 
 #include <iostream>
 #include <thread>
 #include <vector>
-#include <chrono>
 #include <atomic>
 
 // -----------------------------------------------------------------------
-// Milestone 1 Demo — Producer/Consumer in action
+// Milestone 2 — Config + WorkerPool
 //
-// Setup:
-//   - 1 shared TaskBroker (capacity: 100)
-//   - 3 Worker threads  — started first, waiting for work
-//   - 3 Producer threads — each submits 5 tasks (15 tasks total)
+// What changed from M1:
+//   - All magic numbers gone → come from config.json
+//   - WorkerPool replaces the raw vector<unique_ptr<Worker>> in main
+//   - Graceful shutdown with timeout replaces the manual poll loop
+//   - ENV overrides ready for Docker (Milestone 6)
 // -----------------------------------------------------------------------
 
 static std::atomic<int> next_task_id {1};
@@ -24,7 +25,7 @@ Task makeTask(const std::string& producer_name, int local_id) {
     t.id       = next_task_id.fetch_add(1);
     t.name     = producer_name + "-task-" + std::to_string(local_id);
     t.priority = local_id % 3;
-    t.payload  = [name = t.name]() {
+    t.payload  = []() {
         std::this_thread::sleep_for(std::chrono::milliseconds(50 + (rand() % 100)));
     };
     return t;
@@ -33,13 +34,11 @@ Task makeTask(const std::string& producer_name, int local_id) {
 int producerThread(const std::string& name, TaskBroker& broker, int count) {
     int submitted = 0;
     for (int i = 1; i <= count; ++i) {
-        Task t = makeTask(name, i);
-        bool ok = broker.enqueue(std::move(t));
-        if (ok) {
+        if (broker.enqueue(makeTask(name, i))) {
             std::cout << "[" << name << "] submitted task " << i << "/" << count << "\n";
             ++submitted;
         } else {
-            std::cout << "[" << name << "] queue full — task " << i << " dropped\n";
+            std::cout << "[" << name << "] queue full/shutdown — task " << i << " dropped\n";
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -47,40 +46,54 @@ int producerThread(const std::string& name, TaskBroker& broker, int count) {
 }
 
 int main() {
-    std::cout << "=== Distributed Task Queue Engine — Milestone 1 ===\n\n";
+    std::cout << "=== Distributed Task Queue Engine — Milestone 2 ===\n\n";
 
-    TaskBroker broker(100);
-
-    std::cout << "Starting 3 workers...\n";
-    std::vector<std::unique_ptr<Worker>> workers;
-    workers.reserve(3);
-    for (int i = 1; i <= 3; ++i) {
-        workers.push_back(std::make_unique<Worker>(i, broker));
+    // ------------------------------------------------------------------
+    // Step 1: Load config
+    // Path is relative to where you run the binary from.
+    // Run from the repo root: ./build/TaskQueue
+    // ------------------------------------------------------------------
+    Config cfg;
+    try {
+        cfg = Config::load("config/config.json");
+        cfg.applyEnvOverrides();   // Docker ENV wins over JSON
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to load config: " << e.what() << "\n";
+        std::cerr << "Using defaults.\n";
     }
+    cfg.print();
 
-    std::cout << "Launching 3 producers (5 tasks each = 15 total)...\n\n";
+    // ------------------------------------------------------------------
+    // Step 2: Create broker and worker pool — driven entirely by config
+    // ------------------------------------------------------------------
+    TaskBroker broker(cfg.queue_capacity);
+    WorkerPool pool(broker, cfg.num_workers);
+
+    // ------------------------------------------------------------------
+    // Step 3: Launch producers (same as M1 — 3 producers, 5 tasks each)
+    // ------------------------------------------------------------------
+    std::cout << "\nLaunching producers...\n\n";
+    const int TASKS_PER_PRODUCER = 5;
+
     std::vector<std::thread> producers;
-    std::vector<int> submitted_counts(3, 0);
-
-    producers.emplace_back([&]() { submitted_counts[0] = producerThread("Producer-A", broker, 5); });
-    producers.emplace_back([&]() { submitted_counts[1] = producerThread("Producer-B", broker, 5); });
-    producers.emplace_back([&]() { submitted_counts[2] = producerThread("Producer-C", broker, 5); });
+    std::vector<int> counts(3, 0);
+    producers.emplace_back([&](){ counts[0] = producerThread("Producer-A", broker, TASKS_PER_PRODUCER); });
+    producers.emplace_back([&](){ counts[1] = producerThread("Producer-B", broker, TASKS_PER_PRODUCER); });
+    producers.emplace_back([&](){ counts[2] = producerThread("Producer-C", broker, TASKS_PER_PRODUCER); });
 
     for (auto& p : producers) p.join();
+    std::cout << "\nAll producers done. Total submitted: "
+              << counts[0] + counts[1] + counts[2] << "\n";
 
-    int total = submitted_counts[0] + submitted_counts[1] + submitted_counts[2];
-    std::cout << "\nAll producers done. Total submitted: " << total << "\n";
-    std::cout << "Waiting for workers to drain queue...\n";
+    // ------------------------------------------------------------------
+    // Step 4: Graceful shutdown via WorkerPool
+    //
+    // WorkerPool::shutdown() replaces the manual poll loop from M1.
+    // timeout comes from config so ops can tune it without recompile.
+    // ------------------------------------------------------------------
+    std::cout << "\nRequesting graceful shutdown...\n";
+    pool.shutdown(cfg.shutdown_timeout_ms);
 
-    while (broker.size() > 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-    std::cout << "\nShutting down broker...\n";
-    broker.shutdown();
-    workers.clear();  // ~Worker() joins each thread
-
-    std::cout << "\n=== All done. Milestone 1 complete. ===\n";
+    std::cout << "\n=== All done. Milestone 2 complete. ===\n";
     return 0;
 }
