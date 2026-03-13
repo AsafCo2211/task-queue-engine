@@ -9,6 +9,7 @@ COPY CMakeLists.txt .
 COPY include/       include/
 COPY src/           src/
 COPY config/        config/
+COPY tests/         tests/
 
 RUN cmake -B build -DCMAKE_BUILD_TYPE=Release && \
     cmake --build build --parallel
